@@ -28,8 +28,6 @@ type SwipeRecord = {
   } | null;
 };
 
-type Submission = Bill;
-
 const money = (amount: number, currency = "INR") =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -45,33 +43,31 @@ const icons: Record<string, string> = {
 };
 
 function initials(name: string) {
-  return (
-    name.trim().split(/\s+/).slice(0, 2)
-      .map((part) => part[0]?.toUpperCase() || "")
-      .join("") || "U"
-  );
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("") || "U";
 }
 
 export default function Home() {
   const [bills, setBills] = useState<Bill[]>([]);
   const [index, setIndex] = useState(0);
-
   const [supported, setSupported] = useState<string[]>([]);
   const [skipped, setSkipped] = useState<string[]>([]);
   const [history, setHistory] = useState<SwipeRecord[]>([]);
-
-  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [submissions, setSubmissions] = useState<Bill[]>([]);
+  const [pendingBills, setPendingBills] = useState<Bill[]>([]);
   const [tab, setTab] = useState("Discover");
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const [userId, setUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [email, setEmail] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
-
   const [swipeLoading, setSwipeLoading] = useState(false);
 
   // Profile
@@ -81,7 +77,7 @@ export default function Home() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState("");
 
-  // Create a bill
+  // Create bill
   const [billTitle, setBillTitle] = useState("");
   const [billDescription, setBillDescription] = useState("");
   const [billCategory, setBillCategory] = useState("Education");
@@ -93,17 +89,39 @@ export default function Home() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminChecking, setAdminChecking] = useState(false);
   const [adminError, setAdminError] = useState("");
-  const [pendingBills, setPendingBills] = useState<Bill[]>([]);
   const [pendingLoading, setPendingLoading] = useState(false);
   const [moderatingId, setModeratingId] = useState("");
   const [moderationMessage, setModerationMessage] = useState("");
 
   const inputClass =
-    "w-full rounded-2xl border border-white/15 bg-black/20 px-4 py-3 text-white outline-none transition placeholder:text-zinc-600 focus:border-purple-400";
+    "w-full rounded-2xl border border-white/15 bg-black/20 px-4 py-3 text-white outline-none placeholder:text-zinc-600 focus:border-purple-400";
+
+  // Register PWA service worker
+  useEffect(() => {
+    if (
+      process.env.NODE_ENV !== "production" ||
+      !("serviceWorker" in navigator)
+    ) {
+      return;
+    }
+
+    navigator.serviceWorker
+      .register("/sw.js", {
+        scope: "/",
+        updateViaCache: "none",
+      })
+      .then(() => console.log("BillSwipe service worker registered."))
+      .catch((err) =>
+        console.error("Service worker registration failed:", err)
+      );
+  }, []);
 
   // Authentication session
   useEffect(() => {
+    let active = true;
+
     supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
       setUserId(data.session?.user.id || "");
       setUserEmail(data.session?.user.email || "");
     });
@@ -115,10 +133,13 @@ export default function Home() {
       }
     );
 
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
-  // Check admin membership using the secure database function
+  // Check admin permissions
   useEffect(() => {
     let active = true;
 
@@ -130,7 +151,6 @@ export default function Home() {
       }
 
       setAdminChecking(true);
-      setAdminError("");
 
       const { data, error } = await supabase.rpc("is_admin");
 
@@ -141,6 +161,7 @@ export default function Home() {
         setAdminError(error.message);
       } else {
         setIsAdmin(data === true);
+        setAdminError("");
       }
 
       setAdminChecking(false);
@@ -153,7 +174,7 @@ export default function Home() {
     };
   }, [userId]);
 
-  // Fetch approved bills
+  // Fetch public bills
   useEffect(() => {
     let active = true;
 
@@ -182,7 +203,7 @@ export default function Home() {
     };
   }, []);
 
-  // Load profile
+  // Fetch profile
   useEffect(() => {
     let active = true;
 
@@ -195,7 +216,7 @@ export default function Home() {
 
       setProfileLoading(true);
 
-      const fallbackName = userEmail.split("@")[0] || "User";
+      const fallback = userEmail.split("@")[0] || "User";
 
       const { data, error } = await supabase
         .from("profiles")
@@ -205,15 +226,14 @@ export default function Home() {
 
       if (!active) return;
 
-      if (error) {
-        setProfileMessage(error.message);
-        setProfileName(fallbackName);
-        setProfileDraft(fallbackName);
-      } else {
-        const name = data?.display_name || fallbackName;
-        setProfileName(name);
-        setProfileDraft(name);
-      }
+      const name = error
+        ? fallback
+        : data?.display_name || fallback;
+
+      setProfileName(name);
+      setProfileDraft(name);
+
+      if (error) setProfileMessage(error.message);
 
       setProfileLoading(false);
     }
@@ -225,7 +245,7 @@ export default function Home() {
     };
   }, [userId, userEmail]);
 
-  // Load swipe history
+  // Fetch swipe history
   useEffect(() => {
     let active = true;
 
@@ -263,16 +283,12 @@ export default function Home() {
       const records = (data || []) as unknown as SwipeRecord[];
 
       setHistory(records);
-
       setSupported(
-        records
-          .filter((item) => item.action === "support")
+        records.filter((item) => item.action === "support")
           .map((item) => item.bill_id)
       );
-
       setSkipped(
-        records
-          .filter((item) => item.action === "skip")
+        records.filter((item) => item.action === "skip")
           .map((item) => item.bill_id)
       );
     }
@@ -284,7 +300,7 @@ export default function Home() {
     };
   }, [userId]);
 
-  // Load personal submissions
+  // Fetch user's submissions
   useEffect(() => {
     let active = true;
 
@@ -302,9 +318,7 @@ export default function Home() {
 
       if (!active) return;
 
-      if (!error) {
-        setSubmissions((data || []) as Submission[]);
-      }
+      if (!error) setSubmissions((data || []) as Bill[]);
     }
 
     loadSubmissions();
@@ -314,11 +328,11 @@ export default function Home() {
     };
   }, [userId]);
 
-  // Load all pending bills for admins
+  // Fetch pending submissions for admin
   useEffect(() => {
     let active = true;
 
-    async function loadPendingBills() {
+    async function loadPending() {
       if (!isAdmin) {
         setPendingBills([]);
         return;
@@ -338,22 +352,22 @@ export default function Home() {
         setAdminError(error.message);
       } else {
         setPendingBills((data || []) as Bill[]);
+        setAdminError("");
       }
 
       setPendingLoading(false);
     }
 
-    loadPendingBills();
+    loadPending();
 
     return () => {
       active = false;
     };
   }, [isAdmin]);
 
-  // Replay mode: all open bills can be viewed again
   const current = bills[index];
 
-  // Authentication
+  // Email sign-in
   async function handleSignIn(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setAuthLoading(true);
@@ -392,12 +406,12 @@ export default function Home() {
   async function saveProfile(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
-    if (!userId) return;
-
     const name = profileDraft.trim();
 
+    if (!userId) return;
+
     if (!name || name.length > 40) {
-      setProfileMessage("Enter a display name of 1–40 characters.");
+      setProfileMessage("Enter a name between 1 and 40 characters.");
       return;
     }
 
@@ -426,7 +440,7 @@ export default function Home() {
     setProfileSaving(false);
   }
 
-  // Create a pending demo bill
+  // Create a fictional demo bill
   async function createBill(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
@@ -447,7 +461,7 @@ export default function Home() {
     }
 
     if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
-      setSubmissionMessage("Enter a valid amount between ₹1 and ₹10,00,000.");
+      setSubmissionMessage("Enter a valid amount.");
       return;
     }
 
@@ -474,7 +488,7 @@ export default function Home() {
         return;
       }
 
-      setSubmissions((old) => [data as Submission, ...old]);
+      setSubmissions((old) => [data as Bill, ...old]);
 
       if (isAdmin) {
         setPendingBills((old) => [data as Bill, ...old]);
@@ -485,7 +499,7 @@ export default function Home() {
       setBillCategory("Education");
       setBillAmount("");
 
-      setSubmissionMessage("Your demo bill has been submitted for review!");
+      setSubmissionMessage("Submitted successfully for admin review!");
     } catch {
       setSubmissionMessage("Submission failed. Please try again.");
     } finally {
@@ -493,7 +507,7 @@ export default function Home() {
     }
   }
 
-  // Support / Skip with replay and upsert
+  // Persistent Support / Skip
   async function swipe(action: "support" | "skip") {
     if (!current || swipeLoading) return;
 
@@ -576,8 +590,11 @@ export default function Home() {
     setAuthMessage("");
   }
 
-  // Approve or reject a pending bill
-  async function moderateBill(bill: Bill, decision: "open" | "rejected") {
+  // Admin moderation
+  async function moderateBill(
+    bill: Bill,
+    decision: "open" | "rejected"
+  ) {
     if (!isAdmin || moderatingId) return;
 
     setModeratingId(bill.id);
@@ -598,20 +615,18 @@ export default function Home() {
     }
 
     if (!data) {
-      setModerationMessage(
-        "This submission is no longer pending. Refresh the review list."
-      );
+      setModerationMessage("This submission has already been reviewed.");
       setModeratingId("");
       return;
     }
 
-    setPendingBills((old) => old.filter((item) => item.id !== bill.id));
+    setPendingBills((old) =>
+      old.filter((item) => item.id !== bill.id)
+    );
 
     setSubmissions((old) =>
       old.map((item) =>
-        item.id === bill.id
-          ? { ...item, status: decision }
-          : item
+        item.id === bill.id ? { ...item, status: decision } : item
       )
     );
 
@@ -620,7 +635,7 @@ export default function Home() {
         { ...bill, status: "open" },
         ...old.filter((item) => item.id !== bill.id),
       ]);
-      setModerationMessage("Bill approved and published to Discover!");
+      setModerationMessage("Approved and published to Discover!");
     } else {
       setModerationMessage("Submission rejected.");
     }
@@ -720,7 +735,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Main */}
+      {/* Main content */}
       <section className="relative z-10 mx-auto grid max-w-7xl gap-12 px-6 py-16 lg:grid-cols-[1fr_390px]">
 
         <div>
@@ -805,7 +820,7 @@ export default function Home() {
 
                     {history.some((item) => item.bill_id === current.id) && (
                       <p className="mt-5 text-center text-xs text-purple-300">
-                        Previously swiped · Replay updates your existing activity.
+                        Previously swiped · Replay updates existing activity.
                       </p>
                     )}
 
@@ -872,7 +887,6 @@ export default function Home() {
                 </div>
               ) : (
                 <form onSubmit={createBill} className="space-y-5 rounded-[28px] border border-white/10 bg-gradient-to-br from-white/[0.08] to-purple-500/[0.05] p-7">
-
                   <div>
                     <label className="mb-2 block text-sm text-zinc-300">
                       Bill title
@@ -938,7 +952,7 @@ export default function Home() {
                   </div>
 
                   <div className="rounded-2xl border border-purple-300/15 bg-purple-500/10 p-4 text-xs leading-6 text-purple-200">
-                    Demo only. Don't enter real financial, medical or identity
+                    Demo only. Don't enter real financial or identity
                     documents. No actual payments are processed.
                   </div>
 
@@ -963,60 +977,38 @@ export default function Home() {
           {/* My submissions */}
           {tab === "My submissions" && (
             <div className="max-w-xl space-y-6">
-              <div>
-                <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
-                  YOUR REQUESTS
-                </p>
-                <h2 className="mt-3 text-3xl font-semibold">
-                  My submissions
-                </h2>
-              </div>
+              <h2 className="text-3xl font-semibold">My submissions</h2>
 
               {!userId ? (
-                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
-                  Please sign in to view submissions.
-                </div>
+                <p className="text-sm text-zinc-400">Please sign in.</p>
               ) : submissions.length === 0 ? (
                 <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8 text-center">
-                  <p className="text-zinc-300">No submissions yet.</p>
+                  <p>No submissions yet.</p>
                   <button
                     onClick={() => setTab("Create a bill")}
                     className="mt-5 rounded-xl bg-purple-500 px-5 py-3 text-sm font-semibold"
                   >
-                    Create your first demo bill
+                    Create a demo bill
                   </button>
                 </div>
               ) : (
                 <div className="space-y-4">
                   {submissions.map((item) => (
-                    <div key={item.id} className="rounded-[25px] border border-white/10 bg-white/[0.05] p-6">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <span className="text-2xl">
-                            {icons[item.category || "Other"] || "💜"}
-                          </span>
-                          <h3 className="mt-3 font-semibold">{item.title}</h3>
-                        </div>
-
-                        <span className="shrink-0 rounded-full border border-yellow-300/20 bg-yellow-400/10 px-3 py-1.5 text-xs text-yellow-200">
-                          {item.status === "pending"
-                            ? "Pending review"
-                            : item.status === "open"
-                              ? "Approved"
-                              : "Rejected"}
-                        </span>
-                      </div>
-
-                      <p className="mt-3 text-sm leading-6 text-zinc-400">
+                    <div
+                      key={item.id}
+                      className="rounded-[25px] border border-white/10 bg-white/[0.05] p-6"
+                    >
+                      <h3 className="font-semibold">{item.title}</h3>
+                      <p className="mt-3 text-sm text-zinc-400">
                         {item.description}
                       </p>
-
-                      <div className="mt-4 flex items-center justify-between text-sm">
-                        <span className="text-zinc-400">{item.category}</span>
-                        <span className="font-semibold">
-                          {money(Number(item.amount), item.currency)}
-                        </span>
+                      <div className="mt-4 flex justify-between text-sm">
+                        <span>{item.category}</span>
+                        <span>{money(Number(item.amount), item.currency)}</span>
                       </div>
+                      <p className="mt-3 text-xs text-purple-300">
+                        Status: {item.status === "open" ? "Approved" : item.status}
+                      </p>
                     </div>
                   ))}
                 </div>
@@ -1027,15 +1019,7 @@ export default function Home() {
           {/* My activity */}
           {tab === "My activity" && (
             <div className="max-w-xl space-y-6">
-              <div>
-                <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
-                  SPONSOR DASHBOARD
-                </p>
-                <h2 className="mt-3 text-3xl font-semibold">Your activity</h2>
-                <p className="mt-2 text-sm text-zinc-400">
-                  Your personal sponsorship activity and history.
-                </p>
-              </div>
+              <h2 className="text-3xl font-semibold">Your activity</h2>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="rounded-3xl border border-purple-300/20 bg-purple-500/10 p-6">
@@ -1057,17 +1041,16 @@ export default function Home() {
                 </div>
 
                 {!userId ? (
-                  <p className="text-sm text-zinc-400">
-                    Sign in to see your activity.
-                  </p>
+                  <p className="text-sm text-zinc-400">Sign in to see activity.</p>
                 ) : history.length === 0 ? (
-                  <p className="text-sm text-zinc-400">
-                    No activity yet. Explore Discover!
-                  </p>
+                  <p className="text-sm text-zinc-400">No activity yet.</p>
                 ) : (
                   <div className="space-y-4">
                     {history.map((item) => (
-                      <div key={item.bill_id} className="flex items-center justify-between gap-4 border-b border-white/[0.08] pb-4 last:border-0">
+                      <div
+                        key={item.bill_id}
+                        className="flex items-center justify-between gap-4 border-b border-white/[0.08] pb-4 last:border-0"
+                      >
                         <div className="min-w-0">
                           <p className="truncate font-medium">
                             {item.bill?.title || "Demo bill"}
@@ -1082,12 +1065,7 @@ export default function Home() {
                             </p>
                           )}
                         </div>
-
-                        <span className={`shrink-0 rounded-full px-3 py-1.5 text-xs ${
-                          item.action === "support"
-                            ? "border border-purple-300/20 bg-purple-400/15 text-purple-200"
-                            : "border border-white/10 bg-white/[0.06] text-zinc-400"
-                        }`}>
+                        <span className="shrink-0 text-xs text-purple-200">
                           {item.action === "support" ? "♥ Supported" : "Skipped"}
                         </span>
                       </div>
@@ -1101,28 +1079,18 @@ export default function Home() {
           {/* Profile */}
           {tab === "Profile" && (
             <div className="max-w-xl space-y-6">
-              <div>
-                <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
-                  YOUR ACCOUNT
-                </p>
-                <h2 className="mt-3 text-3xl font-semibold">My profile</h2>
-              </div>
+              <h2 className="text-3xl font-semibold">My profile</h2>
 
               {!userId ? (
-                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
-                  Please sign in to view your profile.
-                </div>
+                <p className="text-zinc-400">Please sign in.</p>
               ) : profileLoading ? (
-                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
-                  Loading your profile...
-                </div>
+                <p className="text-zinc-400">Loading profile...</p>
               ) : (
                 <div className="rounded-[28px] border border-white/10 bg-gradient-to-br from-white/[0.09] to-purple-500/[0.06] p-7">
                   <div className="flex items-center gap-5 border-b border-white/10 pb-7">
                     <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-purple-300/40 bg-gradient-to-br from-violet-400 to-purple-700 text-2xl font-bold">
                       {initials(profileName || userEmail)}
                     </div>
-
                     <div className="min-w-0">
                       <h3 className="truncate text-xl font-semibold">
                         {profileName || "BillSwipe User"}
@@ -1139,9 +1107,8 @@ export default function Home() {
                         Display name
                       </label>
                       <input
-                        type="text"
-                        maxLength={40}
                         required
+                        maxLength={40}
                         value={profileDraft}
                         onChange={(e) => setProfileDraft(e.target.value)}
                         className={inputClass}
@@ -1153,10 +1120,9 @@ export default function Home() {
                         Email address
                       </label>
                       <input
-                        type="email"
                         readOnly
                         value={userEmail}
-                        className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-zinc-400 outline-none"
+                        className={`${inputClass} text-zinc-400`}
                       />
                     </div>
 
@@ -1169,9 +1135,7 @@ export default function Home() {
                     </button>
 
                     {profileMessage && (
-                      <p className="text-sm text-purple-300">
-                        {profileMessage}
-                      </p>
+                      <p className="text-sm text-purple-300">{profileMessage}</p>
                     )}
                   </form>
                 </div>
@@ -1179,7 +1143,7 @@ export default function Home() {
             </div>
           )}
 
-          {/* Admin moderation */}
+          {/* Admin */}
           {tab === "Admin" && (
             <div className="max-w-2xl space-y-6">
               <div>
@@ -1189,22 +1153,15 @@ export default function Home() {
                 <h2 className="mt-3 text-3xl font-semibold">
                   Moderation dashboard
                 </h2>
-                <p className="mt-2 text-sm text-zinc-400">
-                  Review demo listings before they appear in Discover.
-                </p>
               </div>
 
               {!userId ? (
-                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
-                  Please sign in first.
-                </div>
+                <p className="text-zinc-400">Please sign in first.</p>
               ) : adminChecking ? (
-                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
-                  Checking admin permissions...
-                </div>
+                <p className="text-zinc-400">Checking admin permissions...</p>
               ) : !isAdmin ? (
                 <div className="rounded-[28px] border border-red-400/20 bg-red-500/10 p-8 text-red-200">
-                  Admin access denied. This account does not have moderation permissions.
+                  Admin access denied.
                   {adminError && <p className="mt-3 text-sm">{adminError}</p>}
                 </div>
               ) : (
@@ -1216,9 +1173,6 @@ export default function Home() {
                     <p className="mt-2 text-4xl font-semibold">
                       {pendingBills.length}
                     </p>
-                    <p className="mt-1 text-sm text-zinc-400">
-                      Demo submissions awaiting a decision
-                    </p>
                   </div>
 
                   {adminError && (
@@ -1226,22 +1180,16 @@ export default function Home() {
                   )}
 
                   {moderationMessage && (
-                    <p className="text-sm text-purple-300">
-                      {moderationMessage}
-                    </p>
+                    <p className="text-sm text-purple-300">{moderationMessage}</p>
                   )}
 
                   {pendingLoading ? (
-                    <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
-                      Loading pending submissions...
-                    </div>
+                    <p className="text-zinc-400">Loading submissions...</p>
                   ) : pendingBills.length === 0 ? (
                     <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-10 text-center">
-                      <p className="text-xl font-semibold">
-                        All caught up!
-                      </p>
+                      <p className="text-xl font-semibold">All caught up!</p>
                       <p className="mt-2 text-sm text-zinc-400">
-                        There are no pending submissions to review.
+                        No pending submissions.
                       </p>
                     </div>
                   ) : (
@@ -1251,52 +1199,29 @@ export default function Home() {
                           key={bill.id}
                           className="rounded-[28px] border border-white/10 bg-white/[0.05] p-6"
                         >
-                          <div className="flex items-start justify-between gap-4">
-                            <div>
-                              <span className="text-2xl">
-                                {icons[bill.category || "Other"] || "💜"}
-                              </span>
-                              <h3 className="mt-3 text-xl font-semibold">
-                                {bill.title}
-                              </h3>
-                              <p className="mt-1 text-xs text-zinc-500">
-                                {bill.category || "Other"}
-                              </p>
-                            </div>
-
-                            <span className="shrink-0 rounded-full border border-yellow-300/20 bg-yellow-400/10 px-3 py-1.5 text-xs text-yellow-200">
-                              Pending
-                            </span>
-                          </div>
-
-                          <p className="mt-4 text-sm leading-7 text-zinc-400">
+                          <h3 className="text-xl font-semibold">{bill.title}</h3>
+                          <p className="mt-2 text-sm text-zinc-400">
                             {bill.description}
                           </p>
-
                           <p className="mt-4 text-2xl font-semibold">
                             {money(Number(bill.amount), bill.currency)}
                           </p>
-
                           <p className="mt-2 text-xs text-zinc-500">
-                            Submitted{" "}
-                            {bill.created_at
-                              ? new Date(bill.created_at).toLocaleDateString("en-IN")
-                              : "Date unavailable"}
+                            {bill.category} · Pending
                           </p>
 
                           <div className="mt-6 grid grid-cols-2 gap-3">
                             <button
                               disabled={!!moderatingId}
                               onClick={() => moderateBill(bill, "rejected")}
-                              className="rounded-xl border border-red-300/20 bg-red-500/10 py-3 text-sm text-red-200 transition hover:bg-red-500/20 disabled:opacity-50"
+                              className="rounded-xl border border-red-300/20 bg-red-500/10 py-3 text-sm text-red-200 disabled:opacity-50"
                             >
                               {moderatingId === bill.id ? "Updating..." : "Reject"}
                             </button>
-
                             <button
                               disabled={!!moderatingId}
                               onClick={() => moderateBill(bill, "open")}
-                              className="rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 py-3 text-sm font-semibold transition hover:opacity-90 disabled:opacity-50"
+                              className="rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 py-3 text-sm font-semibold disabled:opacity-50"
                             >
                               {moderatingId === bill.id ? "Updating..." : "Approve"}
                             </button>
