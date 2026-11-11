@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
 import { supabase } from "@/lib/supabase";
 
 type Bill = {
@@ -12,6 +13,7 @@ type Bill = {
   amount: number;
   currency: string;
   status: string;
+  created_at?: string;
 };
 
 type SwipeRecord = {
@@ -26,6 +28,8 @@ type SwipeRecord = {
   } | null;
 };
 
+type Submission = Bill;
+
 const money = (amount: number, currency = "INR") =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -37,14 +41,12 @@ const icons: Record<string, string> = {
   Education: "🎓",
   Medical: "✚",
   Technology: "💻",
+  Other: "💜",
 };
 
 function initials(name: string) {
   return (
-    name
-      .trim()
-      .split(/\s+/)
-      .slice(0, 2)
+    name.trim().split(/\s+/).slice(0, 2)
       .map((part) => part[0]?.toUpperCase() || "")
       .join("") || "U"
   );
@@ -58,7 +60,9 @@ export default function Home() {
   const [skipped, setSkipped] = useState<string[]>([]);
   const [history, setHistory] = useState<SwipeRecord[]>([]);
 
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [tab, setTab] = useState("Discover");
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -77,6 +81,26 @@ export default function Home() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState("");
 
+  // Create a bill
+  const [billTitle, setBillTitle] = useState("");
+  const [billDescription, setBillDescription] = useState("");
+  const [billCategory, setBillCategory] = useState("Education");
+  const [billAmount, setBillAmount] = useState("");
+  const [submissionLoading, setSubmissionLoading] = useState(false);
+  const [submissionMessage, setSubmissionMessage] = useState("");
+
+  // Admin
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminChecking, setAdminChecking] = useState(false);
+  const [adminError, setAdminError] = useState("");
+  const [pendingBills, setPendingBills] = useState<Bill[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [moderatingId, setModeratingId] = useState("");
+  const [moderationMessage, setModerationMessage] = useState("");
+
+  const inputClass =
+    "w-full rounded-2xl border border-white/15 bg-black/20 px-4 py-3 text-white outline-none transition placeholder:text-zinc-600 focus:border-purple-400";
+
   // Authentication session
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -94,14 +118,53 @@ export default function Home() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Fetch bills
+  // Check admin membership using the secure database function
   useEffect(() => {
+    let active = true;
+
+    async function checkAdmin() {
+      if (!userId) {
+        setIsAdmin(false);
+        setAdminChecking(false);
+        return;
+      }
+
+      setAdminChecking(true);
+      setAdminError("");
+
+      const { data, error } = await supabase.rpc("is_admin");
+
+      if (!active) return;
+
+      if (error) {
+        setIsAdmin(false);
+        setAdminError(error.message);
+      } else {
+        setIsAdmin(data === true);
+      }
+
+      setAdminChecking(false);
+    }
+
+    checkAdmin();
+
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  // Fetch approved bills
+  useEffect(() => {
+    let active = true;
+
     async function loadBills() {
       const { data, error } = await supabase
         .from("bills")
-        .select("id, title, description, category, amount, currency, status")
+        .select("id, title, description, category, amount, currency, status, created_at")
         .eq("status", "open")
         .order("created_at", { ascending: false });
+
+      if (!active) return;
 
       if (error) {
         setError(error.message);
@@ -113,9 +176,13 @@ export default function Home() {
     }
 
     loadBills();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Fetch profile
+  // Load profile
   useEffect(() => {
     let active = true;
 
@@ -127,7 +194,6 @@ export default function Home() {
       }
 
       setProfileLoading(true);
-      setProfileMessage("");
 
       const fallbackName = userEmail.split("@")[0] || "User";
 
@@ -159,7 +225,7 @@ export default function Home() {
     };
   }, [userId, userEmail]);
 
-  // Fetch swipe history
+  // Load swipe history
   useEffect(() => {
     let active = true;
 
@@ -218,13 +284,78 @@ export default function Home() {
     };
   }, [userId]);
 
-  // Replay mode: show all bills, including previously swiped bills
+  // Load personal submissions
+  useEffect(() => {
+    let active = true;
+
+    async function loadSubmissions() {
+      if (!userId) {
+        setSubmissions([]);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("bills")
+        .select("id, title, description, category, amount, currency, status, created_at")
+        .eq("owner_id", userId)
+        .order("created_at", { ascending: false });
+
+      if (!active) return;
+
+      if (!error) {
+        setSubmissions((data || []) as Submission[]);
+      }
+    }
+
+    loadSubmissions();
+
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  // Load all pending bills for admins
+  useEffect(() => {
+    let active = true;
+
+    async function loadPendingBills() {
+      if (!isAdmin) {
+        setPendingBills([]);
+        return;
+      }
+
+      setPendingLoading(true);
+
+      const { data, error } = await supabase
+        .from("bills")
+        .select("id, title, description, category, amount, currency, status, created_at")
+        .eq("status", "pending")
+        .order("created_at", { ascending: true });
+
+      if (!active) return;
+
+      if (error) {
+        setAdminError(error.message);
+      } else {
+        setPendingBills((data || []) as Bill[]);
+      }
+
+      setPendingLoading(false);
+    }
+
+    loadPendingBills();
+
+    return () => {
+      active = false;
+    };
+  }, [isAdmin]);
+
+  // Replay mode: all open bills can be viewed again
   const current = bills[index];
 
-  // Email sign-in
-  async function handleSignIn(e: React.FormEvent<HTMLFormElement>) {
+  // Authentication
+  async function handleSignIn(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-
     setAuthLoading(true);
     setAuthMessage("");
 
@@ -246,7 +377,6 @@ export default function Home() {
     }
   }
 
-  // Sign out
   async function handleSignOut() {
     const { error } = await supabase.auth.signOut();
 
@@ -259,20 +389,15 @@ export default function Home() {
   }
 
   // Save profile
-  async function saveProfile(e: React.FormEvent<HTMLFormElement>) {
+  async function saveProfile(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
     if (!userId) return;
 
     const name = profileDraft.trim();
 
-    if (!name) {
-      setProfileMessage("Please enter a display name.");
-      return;
-    }
-
-    if (name.length > 40) {
-      setProfileMessage("Display name must be 40 characters or less.");
+    if (!name || name.length > 40) {
+      setProfileMessage("Enter a display name of 1–40 characters.");
       return;
     }
 
@@ -301,7 +426,74 @@ export default function Home() {
     setProfileSaving(false);
   }
 
-  // Support / Skip with replay and database update
+  // Create a pending demo bill
+  async function createBill(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+
+    if (!userId) return;
+
+    const title = billTitle.trim();
+    const description = billDescription.trim();
+    const amount = Number(billAmount);
+
+    if (title.length < 3 || title.length > 80) {
+      setSubmissionMessage("Title must be between 3 and 80 characters.");
+      return;
+    }
+
+    if (description.length < 10 || description.length > 400) {
+      setSubmissionMessage("Description must be between 10 and 400 characters.");
+      return;
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
+      setSubmissionMessage("Enter a valid amount between ₹1 and ₹10,00,000.");
+      return;
+    }
+
+    setSubmissionLoading(true);
+    setSubmissionMessage("");
+
+    try {
+      const { data, error } = await supabase
+        .from("bills")
+        .insert({
+          title,
+          description,
+          category: billCategory,
+          amount,
+          currency: "INR",
+          status: "pending",
+          owner_id: userId,
+        })
+        .select("id, title, description, category, amount, currency, status, created_at")
+        .single();
+
+      if (error) {
+        setSubmissionMessage(error.message);
+        return;
+      }
+
+      setSubmissions((old) => [data as Submission, ...old]);
+
+      if (isAdmin) {
+        setPendingBills((old) => [data as Bill, ...old]);
+      }
+
+      setBillTitle("");
+      setBillDescription("");
+      setBillCategory("Education");
+      setBillAmount("");
+
+      setSubmissionMessage("Your demo bill has been submitted for review!");
+    } catch {
+      setSubmissionMessage("Submission failed. Please try again.");
+    } finally {
+      setSubmissionLoading(false);
+    }
+  }
+
+  // Support / Skip with replay and upsert
   async function swipe(action: "support" | "skip") {
     if (!current || swipeLoading) return;
 
@@ -343,38 +535,30 @@ export default function Home() {
         return;
       }
 
-      // Update counts without creating duplicate bill entries
       if (action === "support") {
-        setSupported((old) =>
-          [...old.filter((id) => id !== current.id), current.id]
-        );
-
-        setSkipped((old) =>
-          old.filter((id) => id !== current.id)
-        );
+        setSupported((old) => [
+          ...old.filter((id) => id !== current.id),
+          current.id,
+        ]);
+        setSkipped((old) => old.filter((id) => id !== current.id));
       } else {
-        setSkipped((old) =>
-          [...old.filter((id) => id !== current.id), current.id]
-        );
-
-        setSupported((old) =>
-          old.filter((id) => id !== current.id)
-        );
+        setSkipped((old) => [
+          ...old.filter((id) => id !== current.id),
+          current.id,
+        ]);
+        setSupported((old) => old.filter((id) => id !== current.id));
       }
 
-      // Replace the existing history record for this bill
       if (data) {
-        const updatedRecord = data as unknown as SwipeRecord;
+        const record = data as unknown as SwipeRecord;
 
         setHistory((old) =>
-          [
-            updatedRecord,
-            ...old.filter((item) => item.bill_id !== current.id),
-          ].sort(
-            (a, b) =>
-              new Date(b.created_at).getTime() -
-              new Date(a.created_at).getTime()
-          )
+          [record, ...old.filter((item) => item.bill_id !== current.id)]
+            .sort(
+              (a, b) =>
+                new Date(b.created_at).getTime() -
+                new Date(a.created_at).getTime()
+            )
         );
       }
 
@@ -386,12 +570,73 @@ export default function Home() {
     }
   }
 
-  // Replay all bills
   function replayBills() {
     setIndex(0);
     setTab("Discover");
     setAuthMessage("");
   }
+
+  // Approve or reject a pending bill
+  async function moderateBill(bill: Bill, decision: "open" | "rejected") {
+    if (!isAdmin || moderatingId) return;
+
+    setModeratingId(bill.id);
+    setModerationMessage("");
+
+    const { data, error } = await supabase
+      .from("bills")
+      .update({ status: decision })
+      .eq("id", bill.id)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
+
+    if (error) {
+      setModerationMessage(error.message);
+      setModeratingId("");
+      return;
+    }
+
+    if (!data) {
+      setModerationMessage(
+        "This submission is no longer pending. Refresh the review list."
+      );
+      setModeratingId("");
+      return;
+    }
+
+    setPendingBills((old) => old.filter((item) => item.id !== bill.id));
+
+    setSubmissions((old) =>
+      old.map((item) =>
+        item.id === bill.id
+          ? { ...item, status: decision }
+          : item
+      )
+    );
+
+    if (decision === "open") {
+      setBills((old) => [
+        { ...bill, status: "open" },
+        ...old.filter((item) => item.id !== bill.id),
+      ]);
+      setModerationMessage("Bill approved and published to Discover!");
+    } else {
+      setModerationMessage("Submission rejected.");
+    }
+
+    setModeratingId("");
+  }
+
+  const navItems = [
+    "Discover",
+    "Create a bill",
+    "My submissions",
+    "My activity",
+    "Profile",
+    ...(isAdmin ? ["Admin"] : []),
+    "About",
+  ];
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#090810] text-white selection:bg-purple-500/40">
@@ -404,23 +649,26 @@ export default function Home() {
       </div>
 
       {/* Navbar */}
-      <header className="sticky top-0 z-30 border-b border-white/[0.08] bg-[#090810]/65 backdrop-blur-2xl">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-5">
+      <header className="sticky top-0 z-30 border-b border-white/[0.08] bg-[#090810]/85 backdrop-blur-2xl">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-5">
 
-          <a
-            href="#"
+          <button
             onClick={() => setTab("Discover")}
             className="text-2xl font-black tracking-tight"
           >
             BILL<span className="bg-gradient-to-r from-violet-300 to-purple-500 bg-clip-text text-transparent">SWIPE</span>
-          </a>
+          </button>
 
-          <nav className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] p-1.5 md:flex">
-            {["Discover", "My activity", "Profile", "About"].map((item) => (
+          <nav className="flex flex-wrap items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] p-1">
+            {navItems.map((item) => (
               <button
                 key={item}
-                onClick={() => setTab(item)}
-                className={`rounded-full px-4 py-2 text-sm transition ${
+                onClick={() => {
+                  setTab(item);
+                  setSubmissionMessage("");
+                  setModerationMessage("");
+                }}
+                className={`rounded-full px-3 py-2 text-xs transition sm:px-4 sm:text-sm ${
                   tab === item
                     ? "bg-purple-500/30 text-white shadow-lg shadow-purple-900/30"
                     : "text-zinc-400 hover:text-white"
@@ -451,7 +699,7 @@ export default function Home() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="Your email"
-                className="w-32 rounded-full border border-white/15 bg-white/10 px-4 py-2.5 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-purple-400 sm:w-40"
+                className="w-32 rounded-full border border-white/15 bg-white/10 px-4 py-2.5 text-sm text-white outline-none placeholder:text-zinc-500 sm:w-40"
               />
               <button
                 type="submit"
@@ -472,7 +720,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Main layout */}
+      {/* Main */}
       <section className="relative z-10 mx-auto grid max-w-7xl gap-12 px-6 py-16 lg:grid-cols-[1fr_390px]">
 
         <div>
@@ -529,7 +777,6 @@ export default function Home() {
                       <span className="rounded-full border border-purple-300/20 bg-purple-400/15 px-4 py-2 text-[10px] font-bold tracking-widest text-purple-200">
                         {current.category || "COMMUNITY"}
                       </span>
-
                       <span className="text-[10px] tracking-widest text-zinc-500">
                         DEMO BILL
                       </span>
@@ -556,10 +803,9 @@ export default function Home() {
                       </p>
                     </div>
 
-                    {/* Previous action indicator */}
                     {history.some((item) => item.bill_id === current.id) && (
                       <p className="mt-5 text-center text-xs text-purple-300">
-                        Previously swiped · Replaying this bill updates your existing activity.
+                        Previously swiped · Replay updates your existing activity.
                       </p>
                     )}
 
@@ -591,11 +837,9 @@ export default function Home() {
                   <h2 className="text-2xl font-semibold">
                     You're all caught up.
                   </h2>
-
                   <p className="mt-3 text-sm text-zinc-400">
                     You've explored all available demo bills.
                   </p>
-
                   <button
                     onClick={replayBills}
                     className="mt-7 rounded-xl bg-purple-500 px-6 py-3 font-semibold transition hover:bg-purple-600"
@@ -607,16 +851,187 @@ export default function Home() {
             </>
           )}
 
-          {/* Sponsor dashboard */}
+          {/* Create a bill */}
+          {tab === "Create a bill" && (
+            <div className="max-w-xl space-y-6">
+              <div>
+                <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
+                  NEW SUBMISSION
+                </p>
+                <h2 className="mt-3 text-3xl font-semibold">
+                  Create a demo bill
+                </h2>
+                <p className="mt-2 text-sm leading-7 text-zinc-400">
+                  Submit a fictional sponsorship request for review.
+                </p>
+              </div>
+
+              {!userId ? (
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
+                  Please sign in before creating a submission.
+                </div>
+              ) : (
+                <form onSubmit={createBill} className="space-y-5 rounded-[28px] border border-white/10 bg-gradient-to-br from-white/[0.08] to-purple-500/[0.05] p-7">
+
+                  <div>
+                    <label className="mb-2 block text-sm text-zinc-300">
+                      Bill title
+                    </label>
+                    <input
+                      required
+                      minLength={3}
+                      maxLength={80}
+                      value={billTitle}
+                      onChange={(e) => setBillTitle(e.target.value)}
+                      placeholder="e.g. Learning resources"
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm text-zinc-300">
+                      Description
+                    </label>
+                    <textarea
+                      required
+                      minLength={10}
+                      maxLength={400}
+                      rows={4}
+                      value={billDescription}
+                      onChange={(e) => setBillDescription(e.target.value)}
+                      placeholder="Describe this fictional demo request..."
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm text-zinc-300">
+                      Category
+                    </label>
+                    <select
+                      value={billCategory}
+                      onChange={(e) => setBillCategory(e.target.value)}
+                      className={inputClass}
+                    >
+                      <option value="Education">Education</option>
+                      <option value="Medical">Medical</option>
+                      <option value="Technology">Technology</option>
+                      <option value="Other">Other</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm text-zinc-300">
+                      Required amount (INR)
+                    </label>
+                    <input
+                      required
+                      type="number"
+                      min="1"
+                      max="1000000"
+                      step="1"
+                      value={billAmount}
+                      onChange={(e) => setBillAmount(e.target.value)}
+                      placeholder="Enter amount"
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div className="rounded-2xl border border-purple-300/15 bg-purple-500/10 p-4 text-xs leading-6 text-purple-200">
+                    Demo only. Don't enter real financial, medical or identity
+                    documents. No actual payments are processed.
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={submissionLoading}
+                    className="w-full rounded-2xl bg-gradient-to-r from-violet-500 to-purple-600 py-4 font-semibold disabled:opacity-50"
+                  >
+                    {submissionLoading ? "Submitting..." : "Submit for review"}
+                  </button>
+
+                  {submissionMessage && (
+                    <p className="text-sm text-purple-300">
+                      {submissionMessage}
+                    </p>
+                  )}
+                </form>
+              )}
+            </div>
+          )}
+
+          {/* My submissions */}
+          {tab === "My submissions" && (
+            <div className="max-w-xl space-y-6">
+              <div>
+                <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
+                  YOUR REQUESTS
+                </p>
+                <h2 className="mt-3 text-3xl font-semibold">
+                  My submissions
+                </h2>
+              </div>
+
+              {!userId ? (
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
+                  Please sign in to view submissions.
+                </div>
+              ) : submissions.length === 0 ? (
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8 text-center">
+                  <p className="text-zinc-300">No submissions yet.</p>
+                  <button
+                    onClick={() => setTab("Create a bill")}
+                    className="mt-5 rounded-xl bg-purple-500 px-5 py-3 text-sm font-semibold"
+                  >
+                    Create your first demo bill
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {submissions.map((item) => (
+                    <div key={item.id} className="rounded-[25px] border border-white/10 bg-white/[0.05] p-6">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <span className="text-2xl">
+                            {icons[item.category || "Other"] || "💜"}
+                          </span>
+                          <h3 className="mt-3 font-semibold">{item.title}</h3>
+                        </div>
+
+                        <span className="shrink-0 rounded-full border border-yellow-300/20 bg-yellow-400/10 px-3 py-1.5 text-xs text-yellow-200">
+                          {item.status === "pending"
+                            ? "Pending review"
+                            : item.status === "open"
+                              ? "Approved"
+                              : "Rejected"}
+                        </span>
+                      </div>
+
+                      <p className="mt-3 text-sm leading-6 text-zinc-400">
+                        {item.description}
+                      </p>
+
+                      <div className="mt-4 flex items-center justify-between text-sm">
+                        <span className="text-zinc-400">{item.category}</span>
+                        <span className="font-semibold">
+                          {money(Number(item.amount), item.currency)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* My activity */}
           {tab === "My activity" && (
             <div className="max-w-xl space-y-6">
               <div>
                 <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
                   SPONSOR DASHBOARD
                 </p>
-                <h2 className="mt-3 text-3xl font-semibold">
-                  Your activity
-                </h2>
+                <h2 className="mt-3 text-3xl font-semibold">Your activity</h2>
                 <p className="mt-2 text-sm text-zinc-400">
                   Your personal sponsorship activity and history.
                 </p>
@@ -627,7 +1042,6 @@ export default function Home() {
                   <p className="text-4xl font-semibold">{supported.length}</p>
                   <p className="mt-2 text-sm text-zinc-400">Supported</p>
                 </div>
-
                 <div className="rounded-3xl border border-white/10 bg-white/[0.05] p-6">
                   <p className="text-4xl font-semibold">{skipped.length}</p>
                   <p className="mt-2 text-sm text-zinc-400">Skipped</p>
@@ -653,10 +1067,7 @@ export default function Home() {
                 ) : (
                   <div className="space-y-4">
                     {history.map((item) => (
-                      <div
-                        key={item.bill_id}
-                        className="flex items-center justify-between gap-4 border-b border-white/[0.08] pb-4 last:border-0"
-                      >
+                      <div key={item.bill_id} className="flex items-center justify-between gap-4 border-b border-white/[0.08] pb-4 last:border-0">
                         <div className="min-w-0">
                           <p className="truncate font-medium">
                             {item.bill?.title || "Demo bill"}
@@ -667,21 +1078,16 @@ export default function Home() {
                           </p>
                           {item.bill && (
                             <p className="mt-1 text-sm text-zinc-300">
-                              {money(
-                                Number(item.bill.amount),
-                                item.bill.currency
-                              )}
+                              {money(Number(item.bill.amount), item.bill.currency)}
                             </p>
                           )}
                         </div>
 
-                        <span
-                          className={`shrink-0 rounded-full px-3 py-1.5 text-xs ${
-                            item.action === "support"
-                              ? "border border-purple-300/20 bg-purple-400/15 text-purple-200"
-                              : "border border-white/10 bg-white/[0.06] text-zinc-400"
-                          }`}
-                        >
+                        <span className={`shrink-0 rounded-full px-3 py-1.5 text-xs ${
+                          item.action === "support"
+                            ? "border border-purple-300/20 bg-purple-400/15 text-purple-200"
+                            : "border border-white/10 bg-white/[0.06] text-zinc-400"
+                        }`}>
                           {item.action === "support" ? "♥ Supported" : "Skipped"}
                         </span>
                       </div>
@@ -700,9 +1106,6 @@ export default function Home() {
                   YOUR ACCOUNT
                 </p>
                 <h2 className="mt-3 text-3xl font-semibold">My profile</h2>
-                <p className="mt-2 text-sm text-zinc-400">
-                  Manage your BillSwipe identity.
-                </p>
               </div>
 
               {!userId ? (
@@ -714,9 +1117,9 @@ export default function Home() {
                   Loading your profile...
                 </div>
               ) : (
-                <div className="rounded-[28px] border border-white/10 bg-gradient-to-br from-white/[0.09] to-purple-500/[0.06] p-7 backdrop-blur-2xl">
+                <div className="rounded-[28px] border border-white/10 bg-gradient-to-br from-white/[0.09] to-purple-500/[0.06] p-7">
                   <div className="flex items-center gap-5 border-b border-white/10 pb-7">
-                    <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-purple-300/40 bg-gradient-to-br from-violet-400 to-purple-700 text-2xl font-bold shadow-lg shadow-purple-900/40">
+                    <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-purple-300/40 bg-gradient-to-br from-violet-400 to-purple-700 text-2xl font-bold">
                       {initials(profileName || userEmail)}
                     </div>
 
@@ -726,9 +1129,6 @@ export default function Home() {
                       </h3>
                       <p className="mt-1 truncate text-sm text-zinc-400">
                         {userEmail}
-                      </p>
-                      <p className="mt-2 text-xs text-purple-300">
-                        BillSwipe member
                       </p>
                     </div>
                   </div>
@@ -744,12 +1144,8 @@ export default function Home() {
                         required
                         value={profileDraft}
                         onChange={(e) => setProfileDraft(e.target.value)}
-                        placeholder="Enter your name"
-                        className="w-full rounded-2xl border border-white/15 bg-black/20 px-4 py-3 text-white outline-none transition placeholder:text-zinc-600 focus:border-purple-400"
+                        className={inputClass}
                       />
-                      <p className="mt-2 text-xs text-zinc-500">
-                        Maximum 40 characters.
-                      </p>
                     </div>
 
                     <div>
@@ -767,7 +1163,7 @@ export default function Home() {
                     <button
                       type="submit"
                       disabled={profileSaving}
-                      className="w-full rounded-2xl bg-gradient-to-r from-violet-500 to-purple-600 py-4 font-semibold shadow-lg shadow-purple-900/30 transition hover:opacity-90 disabled:opacity-50"
+                      className="w-full rounded-2xl bg-gradient-to-r from-violet-500 to-purple-600 py-4 font-semibold disabled:opacity-50"
                     >
                       {profileSaving ? "Saving..." : "Save profile"}
                     </button>
@@ -779,6 +1175,137 @@ export default function Home() {
                     )}
                   </form>
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* Admin moderation */}
+          {tab === "Admin" && (
+            <div className="max-w-2xl space-y-6">
+              <div>
+                <p className="text-xs font-bold tracking-[0.25em] text-purple-300">
+                  PRIVATE ADMIN AREA
+                </p>
+                <h2 className="mt-3 text-3xl font-semibold">
+                  Moderation dashboard
+                </h2>
+                <p className="mt-2 text-sm text-zinc-400">
+                  Review demo listings before they appear in Discover.
+                </p>
+              </div>
+
+              {!userId ? (
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
+                  Please sign in first.
+                </div>
+              ) : adminChecking ? (
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
+                  Checking admin permissions...
+                </div>
+              ) : !isAdmin ? (
+                <div className="rounded-[28px] border border-red-400/20 bg-red-500/10 p-8 text-red-200">
+                  Admin access denied. This account does not have moderation permissions.
+                  {adminError && <p className="mt-3 text-sm">{adminError}</p>}
+                </div>
+              ) : (
+                <>
+                  <div className="rounded-3xl border border-purple-300/20 bg-purple-500/10 p-6">
+                    <p className="text-xs font-bold tracking-widest text-purple-200">
+                      PENDING REVIEW
+                    </p>
+                    <p className="mt-2 text-4xl font-semibold">
+                      {pendingBills.length}
+                    </p>
+                    <p className="mt-1 text-sm text-zinc-400">
+                      Demo submissions awaiting a decision
+                    </p>
+                  </div>
+
+                  {adminError && (
+                    <p className="text-sm text-red-300">{adminError}</p>
+                  )}
+
+                  {moderationMessage && (
+                    <p className="text-sm text-purple-300">
+                      {moderationMessage}
+                    </p>
+                  )}
+
+                  {pendingLoading ? (
+                    <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-8">
+                      Loading pending submissions...
+                    </div>
+                  ) : pendingBills.length === 0 ? (
+                    <div className="rounded-[28px] border border-white/10 bg-white/[0.05] p-10 text-center">
+                      <p className="text-xl font-semibold">
+                        All caught up!
+                      </p>
+                      <p className="mt-2 text-sm text-zinc-400">
+                        There are no pending submissions to review.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-5">
+                      {pendingBills.map((bill) => (
+                        <div
+                          key={bill.id}
+                          className="rounded-[28px] border border-white/10 bg-white/[0.05] p-6"
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div>
+                              <span className="text-2xl">
+                                {icons[bill.category || "Other"] || "💜"}
+                              </span>
+                              <h3 className="mt-3 text-xl font-semibold">
+                                {bill.title}
+                              </h3>
+                              <p className="mt-1 text-xs text-zinc-500">
+                                {bill.category || "Other"}
+                              </p>
+                            </div>
+
+                            <span className="shrink-0 rounded-full border border-yellow-300/20 bg-yellow-400/10 px-3 py-1.5 text-xs text-yellow-200">
+                              Pending
+                            </span>
+                          </div>
+
+                          <p className="mt-4 text-sm leading-7 text-zinc-400">
+                            {bill.description}
+                          </p>
+
+                          <p className="mt-4 text-2xl font-semibold">
+                            {money(Number(bill.amount), bill.currency)}
+                          </p>
+
+                          <p className="mt-2 text-xs text-zinc-500">
+                            Submitted{" "}
+                            {bill.created_at
+                              ? new Date(bill.created_at).toLocaleDateString("en-IN")
+                              : "Date unavailable"}
+                          </p>
+
+                          <div className="mt-6 grid grid-cols-2 gap-3">
+                            <button
+                              disabled={!!moderatingId}
+                              onClick={() => moderateBill(bill, "rejected")}
+                              className="rounded-xl border border-red-300/20 bg-red-500/10 py-3 text-sm text-red-200 transition hover:bg-red-500/20 disabled:opacity-50"
+                            >
+                              {moderatingId === bill.id ? "Updating..." : "Reject"}
+                            </button>
+
+                            <button
+                              disabled={!!moderatingId}
+                              onClick={() => moderateBill(bill, "open")}
+                              className="rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 py-3 text-sm font-semibold transition hover:opacity-90 disabled:opacity-50"
+                            >
+                              {moderatingId === bill.id ? "Updating..." : "Approve"}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -808,7 +1335,6 @@ export default function Home() {
                 <p className="text-4xl font-semibold">{supported.length}</p>
                 <p className="mt-2 text-xs text-zinc-400">Supported</p>
               </div>
-
               <div>
                 <p className="text-4xl font-semibold">{skipped.length}</p>
                 <p className="mt-2 text-xs text-zinc-400">Skipped</p>
